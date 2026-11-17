@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="dark">
+<title>Itadori dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+<style>
+:root{color-scheme:dark;--bg:#050B1A;--panel:#0A1730;--line:#14305F;--ink:#EAF3FF;--mut:#8FA6C8;--cy:#4FD1FF;--am:#FFB347;--rd:#FF5C7A}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 85% -10%,#12356f 0,transparent 55%),var(--bg);color:var(--ink);font:16px/1.5 Inter,system-ui,sans-serif;min-height:100vh}
+header{padding:32px 5vw 18px;display:flex;flex-wrap:wrap;gap:20px 48px;align-items:flex-end;justify-content:space-between}
+h1{font:700 clamp(40px,6vw,72px)/1 'Space Grotesk',sans-serif;margin:0 0 8px;letter-spacing:-0.02em}header p{margin:0;color:var(--mut);max-width:60ch}
+.bar{display:flex;flex-wrap:wrap;gap:10px}
+button{font:500 15px Inter,sans-serif;color:var(--ink);background:#0F2A55;border:1px solid #1B4B9B;border-radius:10px;padding:11px 16px;cursor:pointer}
+button:hover{background:#15397a}button.bad{border-color:var(--rd);background:#3a1426}button.q{background:transparent;border-color:var(--line);color:var(--mut)}button:focus-visible{outline:2px solid var(--cy);outline-offset:2px}
+main{display:grid;grid-template-columns:1fr 1fr;gap:20px;padding:8px 5vw 0}.p{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px}
+.p h2{font:700 28px 'Space Grotesk',sans-serif;margin:0}.sub{margin:2px 0 12px;color:var(--mut)}
+canvas{width:100%;height:340px;display:block;background:radial-gradient(circle,#0d2147,#081227);border-radius:10px;cursor:crosshair}
+.k{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:16px 0 8px}dt{color:var(--mut);font-size:14px}dd{margin:0;font:700 clamp(26px,3.4vw,40px)/1.15 'Space Grotesk',sans-serif}
+.ex{margin:0;color:var(--mut);font-size:15px;min-height:46px}
+.foot{padding:20px 5vw 40px;display:grid;grid-template-columns:1fr 1fr;gap:20px;color:var(--mut);font-size:15px}
+ul{list-style:none;margin:0;padding:0}li{padding:4px 0;border-bottom:1px solid var(--line)}li b{color:var(--ink);font-weight:600;margin-right:8px}
+.lg span{margin-right:18px;white-space:nowrap}.lg i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
+@media(max-width:900px){main,.foot{grid-template-columns:1fr}canvas{height:280px}}
+</style></head><body>
+<header><div><h1>Itadori</h1><p>The real protocol stack running live: nodes exchange authenticated frames, route by measured link quality, and vote to quarantine liars. Both networks get the same fault. Click a node to target it, or leave it to hit the busiest relay. <span id="st"></span></p></div>
+<div class="bar"><button data-f="crash">Crash a relay</button><button data-f="cut">Cut a link</button><button data-f="degrade">Degrade a relay</button><button data-f="malicious" class="bad">Turn a relay malicious</button><button id="reset" class="q">Reset</button></div></header>
+<main id="m"></main>
+<div class="foot"><div><p class="lg"><span><i style="background:#4FD1FF"></i>Healthy</span><span><i style="background:#FFB347"></i>Weak transmitter</span><span><i style="background:#2a3f6a"></i>Crashed</span><span><i style="background:#FF5C7A"></i>Malicious</span></p>
+<p>Lines show each node's current route toward the ringed gateway. Dots are real data frames, amber rings are signed consensus messages. The radio is emulated, everything above it is real code.</p></div>
+<div><b style="color:#EAF3FF">What just happened</b><ul id="log"></ul></div></div>
+<script>
+const $=s=>document.querySelector(s),PAD=34,COL={ok:'#4FD1FF',weak:'#FFB347',dead:'#2a3f6a',bad:'#FF5C7A'};
+let S=null,since=0,sel=null,pulses=[];
+const P=[['Plain mesh','Hop-count routing, trusts every node'],['Itadori','Quality routing, watchdog, signed quarantine consensus']];
+$('#m').innerHTML=P.map(p=>`<section class="p"><h2>${p[0]}</h2><p class="sub">${p[1]}</p><canvas aria-label="${p[0]} live network"></canvas><dl class="k"><div><dt>Delivered</dt><dd class="dl">...</dd></div><div><dt>Corrupted</dt><dd class="cr">...</dd></div><div><dt>Last 30 s</dt><dd class="n" style="font-size:22px;padding-top:8px">protocol time</dd></div></dl><p class="ex"></p></section>`).join('');
+const cv=[...document.querySelectorAll('canvas')],secs=[...document.querySelectorAll('.p')];
+const px=(n,w)=>PAD+n.x*(w-2*PAD),py=(n,h)=>PAD+n.y*(h-2*PAD);
+async function poll(){try{const r=await fetch('/state?since='+since);S=await r.json();
+ S.nets.forEach((n,i)=>n.frames.forEach(f=>pulses.push({i,s:f[1],t:f[2],n:f[3],t0:performance.now()})));since=S.t;ui();}catch(e){$('#st').textContent='Waiting for the server...';}setTimeout(poll,350);}
+function ui(){$('#st').textContent=S.t<40?'Mesh is forming, give it a few seconds.':'';
+ S.nets.forEach((n,i)=>{const s=secs[i],set=(c,v,col)=>{const e=s.querySelector(c);e.textContent=v;e.style.color=col||''};
+  set('.dl',S.t<40?'...':Math.round(n.delivery*100)+'%',n.delivery>.88?'var(--cy)':n.delivery>.7?'var(--am)':'var(--rd)');
+  set('.cr',S.t<40?'...':Math.round(n.corrupted*100)+'%',n.corrupted>.05?'var(--rd)':'');
+  const q=n.nodes.filter(x=>x.quar).map(x=>x.id);
+  s.querySelector('.ex').textContent=i?(q.length?'Node '+q.join(', ')+' quarantined by consensus, every node now routes around it.':'No quarantines yet. Consensus runs only when two nodes accuse the same relay.'):'No trust model, so a lying node stays in the route.';});
+ $('#log').innerHTML=S.log.map(l=>`<li><b>${Math.round(l[0])} s</b>${l[1]}</li>`).join('')||'<li>Pick a fault above to start.</li>';}
+function draw(c,i,now){const n=S&&S.nets[i];if(!n)return;const d=devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;if(c.width!==Math.round(w*d)||c.height!==Math.round(h*d)){c.width=Math.round(w*d);c.height=Math.round(h*d);}
+ const g=c.getContext('2d');g.setTransform(d,0,0,d,0,0);g.clearRect(0,0,w,h);const N=n.nodes;
+ g.lineWidth=1.2;g.strokeStyle='rgba(79,209,255,.14)';for(const [a,b] of n.links){if(!N[a].alive||!N[b].alive)continue;g.beginPath();g.moveTo(px(N[a],w),py(N[a],h));g.lineTo(px(N[b],w),py(N[b],h));g.stroke();}
+ g.lineWidth=3;g.strokeStyle='rgba(79,209,255,.6)';for(const a of N){if(!a.alive||a.next===null)continue;const b=N[a.next];g.strokeStyle=b.bad?'rgba(255,92,122,.7)':'rgba(79,209,255,.6)';g.beginPath();g.moveTo(px(a,w),py(a,h));g.lineTo(px(b,w),py(b,h));g.stroke();}
+ pulses=pulses.filter(p=>now-p.t0<700);
+ for(const p of pulses){if(p.i!==i)continue;const f=(now-p.t0)/700,a=N[p.s];if(!a)continue;
+  if(p.t===3&&N[p.n]){const b=N[p.n];g.fillStyle='#c8f1ff';g.beginPath();g.arc(px(a,w)+(px(b,w)-px(a,w))*f,py(a,h)+(py(b,h)-py(a,h))*f,3.5,0,7);g.fill();}
+  else if(p.t===4){g.strokeStyle='rgba(255,179,71,'+(1-f)+')';g.lineWidth=2;g.beginPath();g.arc(px(a,w),py(a,h),12+30*f,0,7);g.stroke();}}
+ for(const a of N){const x=px(a,w),y=py(a,h),st=!a.alive?'dead':a.bad?'bad':a.weak?'weak':'ok';g.fillStyle=COL[st];g.beginPath();g.arc(x,y,a.gw?13:10,0,7);g.fill();
+  g.fillStyle='#07122B';g.font='600 11px Inter,sans-serif';g.textAlign='center';g.fillText(a.id,x,y+4);
+  if(a.gw){g.strokeStyle='#EAF3FF';g.lineWidth=2;g.beginPath();g.arc(x,y,18,0,7);g.stroke();}
+  if(a.quar){g.strokeStyle='#FF5C7A';g.lineWidth=2;g.setLineDash([4,4]);g.beginPath();g.arc(x,y,20,0,7);g.stroke();g.setLineDash([]);}
+  if(a.id===sel){g.strokeStyle='#fff';g.lineWidth=2;g.beginPath();g.arc(x,y,16,0,7);g.stroke();}
+  if(!a.alive){g.strokeStyle='#8FA6C8';g.lineWidth=2;g.beginPath();g.moveTo(x-5,y-5);g.lineTo(x+5,y+5);g.moveTo(x+5,y-5);g.lineTo(x-5,y+5);g.stroke();}}}
+function frame(now){cv.forEach((c,i)=>draw(c,i,now));requestAnimationFrame(frame);}
+cv.forEach((c,i)=>c.addEventListener('click',e=>{if(!S)return;const r=c.getBoundingClientRect();let best=null,bd=24;S.nets[i].nodes.forEach(n=>{const d=Math.hypot(px(n,r.width)-(e.clientX-r.left),py(n,r.height)-(e.clientY-r.top));if(d<bd){bd=d;best=n.id;}});sel=best!==null&&!S.nets[i].nodes[best].gw?best:null;}));
+document.querySelectorAll('[data-f]').forEach(b=>b.onclick=async()=>{await fetch('/fault?kind='+b.dataset.f+(sel!==null?'&node='+sel:''),{method:'POST'});sel=null;});
+$('#reset').onclick=async()=>{await fetch('/reset',{method:'POST'});since=0;pulses=[];};
+poll();requestAnimationFrame(frame);
+</script></body></html>
