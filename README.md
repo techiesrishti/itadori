@@ -11,6 +11,7 @@ A Byzantine-resilient, self-healing LoRa mesh protocol, written as real networki
 | Overhearing watchdog, signed accusations, quorum consensus (f=1 in a 4-node cluster) | Real |
 | Time on air (Semtech formula), range, loss, half-duplex transmit | Emulated in `itadori/air.py` |
 | RF propagation, interference, collisions, duty-cycle limits | Not modelled |
+| Hash-chained decision ledger, commit-signature finality, chain sync between nodes | Real |
 
 The emulated radio is the only part that needs hardware. To run on real radios, replace the UDP `sendto` and receive path in `Node` with an SX126x driver. The protocol code above it does not change.
 
@@ -42,6 +43,16 @@ Two live networks run side by side, the plain mesh and Itadori, and both receive
 - **Quarantine.** The primary (gateway) proposes quarantine once two distinct signed accusers exist. Cluster members vote only if they independently hold the same evidence, then prepare and commit. Three of four commits quarantine the node everywhere, so one silent or lying cluster member cannot block or force a decision.
 - **Plain baseline.** `mode='plain'` uses hop-count routing with no watchdog and no trust, like a mesh that trusts every node.
 
+## Ledger
+
+Every quarantine decision the cluster commits is recorded in a permissioned, hash-chained ledger. This is not a public blockchain: there is no mining, no tokens and no external chain. It is a tamper-evident audit trail that a response agency could verify after an incident.
+
+- **What goes in a block.** The decision (which node was quarantined), the distinct accusers, and the consensus sequence number. Each block holds the hash of the previous one.
+- **Finality.** A block is valid only if it links to the previous hash and carries valid Ed25519 commit signatures from a quorum (3 of the 4 cluster members). One Byzantine cluster member cannot forge, fork or censor a block.
+- **No block broadcasting.** Every node builds the same block from the committed decision, so full blocks never cross the radio. Nodes gossip a short head hash and height, and a node that is behind requests the missing blocks, which are fragmented to fit the 255-byte LoRa frame limit.
+- **Verification.** Each node checks the whole chain when it loads from disk and refuses a broken one. A node whose chain is corrupted detects it and resyncs from its peers.
+- **Dashboard.** Each network shows chain height, head hash, and whether all live nodes agree. A "Corrupt a block" button tampers with one node's chain so you can watch verification fail and the node recover.
+
 ## Results (one run per cell, protocol seconds)
 
 Fault injected at the busiest relay; "After" is measured over 60 s starting 40 s after the fault. Single runs are noisy, so expect swings of about 10 points between runs.
@@ -67,3 +78,6 @@ The consistent signal is the malicious node: the plain mesh keeps delivering cor
 - Keys are provisioned in the test harness. A real deployment needs key distribution and revocation.
 - Collisions and duty-cycle limits are not modelled, so channel capacity is optimistic.
 - The 8-node topology is small and fixed, and results are not averaged over many layouts.
+- The ledger has no proof of work. Its finality is only as strong as the cluster quorum, so if 2 of the 4 cluster members are compromised, it can be forged.
+- It records decisions, not raw traffic, and it is tamper-evident rather than "immutable" or "trustless".
+- Ledger sync shares the same low-bandwidth channel as everything else, so catching up after a long outage is slow.
