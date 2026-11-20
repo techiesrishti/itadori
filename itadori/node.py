@@ -5,6 +5,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from . import protocol as P
 from .lora import airtime
+from .ledger import Chain, quarantine_record
 
 @dataclass
 class Config:
@@ -18,6 +19,7 @@ class Config:
     cluster: tuple = (0, 1, 3, 6)  # consensus cluster, first member is the primary; 4 members tolerate f=1
     base_port: int = 20000
     seed: int = 1
+    ledger_dir: str = None         # directory for per-node ledger persistence; None = in-memory only
 
 class Node(asyncio.DatagramProtocol):
     def __init__(self, nid, cfg, prov):
@@ -29,9 +31,14 @@ class Node(asyncio.DatagramProtocol):
         self.quarantined, self.accusers, self.last_accuse = set(), defaultdict(set), {}
         self.pp, self.voted, self.proposed, self.sent_commit = set(), set(), set(), set()
         self.prepares, self.commits = defaultdict(set), defaultdict(set)
+        # ledger: accumulate commit signatures per (target, n) until quorum, then seal block
+        self._commit_sigs = defaultdict(dict)   # (target, n) -> {node_id: sig bytes}
+        self._ledger_pending = {}               # (target, n) -> records list (waiting for sigs)
         self.behavior, self.mute = 'honest', False
         self.sent = self.ok = self.bad = self.forwarded = self.fwd_window = 0
         self.events, self.tasks, self.alive = [], [], False
+        # ledger – created in start() so pub_keys are ready
+        self.chain: Chain = None
     now = staticmethod(time.monotonic)
     def event(self, msg): self.events.append((self.now(), msg))
 
@@ -39,6 +46,11 @@ class Node(asyncio.DatagramProtocol):
         self.loop = asyncio.get_running_loop(); self.txq = asyncio.Queue()
         self.transport, _ = await self.loop.create_datagram_endpoint(lambda: self, local_addr=('127.0.0.1', self.cfg.base_port + self.id))
         self.hub = ('127.0.0.1', self.cfg.base_port - 1); self.alive = True
+        # Initialise ledger (itadori mode only)
+        if self.itadori:
+            self.chain = Chain(self.id, self.cfg.cluster, self.prov.pub,
+                               knet=self.prov.knet,
+                               data_dir=self.cfg.ledger_dir)
         self.tasks = [self.loop.create_task(c) for c in (self.tx_loop(), self.hello_loop(), self.lsa_loop(), self.data_loop(), self.gc_loop())]
     def stop(self):
         self.alive = False
@@ -67,7 +79,9 @@ class Node(asyncio.DatagramProtocol):
     async def hello_loop(self):
         await asyncio.sleep(self.rng.random() * self.cfg.hello * self.scale)
         while True:
-            self.send(P.Frame(P.HELLO, self.id, self.id, P.BCAST, self.hello_seq, 1)); self.hello_seq += 1
+            # Piggyback 10-byte ledger head summary on HELLO if itadori mode
+            extra = self.chain.head_summary() if (self.itadori and self.chain) else b''
+            self.send(P.Frame(P.HELLO, self.id, self.id, P.BCAST, self.hello_seq, 1, extra)); self.hello_seq += 1
             await asyncio.sleep(self.cfg.hello * self.scale)
             dead = [n for n, h in self.hist.items() if self.now() - h['t'] > 4 * self.cfg.hello * self.scale]
             for n in dead: del self.hist[n]
@@ -76,6 +90,14 @@ class Node(asyncio.DatagramProtocol):
         h = self.hist.setdefault(f.sender, {'seqs': set(), 'max': -1, 't': 0})
         h['seqs'].add(f.seq); h['max'] = max(h['max'], f.seq); h['t'] = self.now()
         if len(h['seqs']) > 40: h['seqs'] = {s for s in h['seqs'] if s > h['max'] - 16}
+        # Ledger sync: if peer advertises a taller/different chain, request missing blocks
+        if self.itadori and self.chain and len(f.payload) >= 10:
+            peer_hash = f.payload[:8]
+            peer_height = struct.unpack('>H', f.payload[8:10])[0]
+            my_head = self.chain.head()
+            if peer_height > my_head.height or (peer_height == my_head.height and peer_hash != my_head.block_hash[:8]):
+                # Request blocks from (my_height+1) onward
+                self._request_blocks(f.sender, my_head.height + 1)
     def link_q(self, n):
         h = self.hist[n]
         return max(0.05, sum(1 for s in h['seqs'] if s > h['max'] - 16) / min(16, h['max'] + 1))
@@ -163,15 +185,18 @@ class Node(asyncio.DatagramProtocol):
         sig = P.sign(self.prov.priv[self.id], ctype, body, self.id, self.cseq)
         f = P.Frame(P.CTRL, self.id, self.id, P.BCAST, self.cseq, 6, bytes([ctype]) + body + sig)
         self.cseen.add((self.id, self.cseq, ctype)); self.send(f); self.send(f, delay=0.4)
-        self.process_ctrl(self.id, ctype, body)
+        self.process_ctrl(self.id, ctype, body, raw_sig=(self.cseq, sig))
     def on_ctrl(self, f):
         ctype, body, sig = f.payload[0], f.payload[1:-P.SIG], f.payload[-P.SIG:]; key = (f.origin, f.seq, ctype)
         pub = self.prov.pub.get(f.origin)
         if key in self.cseen or not pub or not P.verify(pub, sig, ctype, body, f.origin, f.seq): return
         self.cseen.add(key)
+        # BLOCK_REQ and BLOCK_RESP are point-to-point (not flooded)
+        if ctype in (P.BLOCK_REQ, P.BLOCK_RESP):
+            self.process_ctrl(f.origin, ctype, body, raw_sig=(f.seq, sig)); return
         if f.ttl > 1: self.send(f.copy(sender=self.id, ttl=f.ttl - 1), delay=self.rng.random() * 0.3)
-        self.process_ctrl(f.origin, ctype, body)
-    def process_ctrl(self, origin, ctype, body):
+        self.process_ctrl(f.origin, ctype, body, raw_sig=(f.seq, sig))
+    def process_ctrl(self, origin, ctype, body, raw_sig=None):
         cl = self.cfg.cluster; quorum = 2 * ((len(cl) - 1) // 3) + 1; k = body[0]
         n = struct.unpack('>H', body[1:3])[0] if len(body) >= 3 else 0
         if ctype == P.ACCUSE: self.accusers[k].add(origin); self.maybe_propose(k)
@@ -179,9 +204,80 @@ class Node(asyncio.DatagramProtocol):
         elif ctype == P.PREPARE and origin in cl: self.prepares[(k, n)].add(origin)
         elif ctype == P.COMMIT and origin in cl:
             self.commits[(k, n)].add(origin)
+            # Collect commit signatures for the ledger
+            if self.itadori and self.chain and raw_sig is not None:
+                self._commit_sigs[(k, n)][origin] = raw_sig
             if len(self.commits[(k, n)]) >= quorum and k not in self.quarantined:
                 self.quarantined.add(k); self.event(f'node {k} quarantined')
+                # Seal ledger block once quorum commits reached
+                if self.itadori and self.chain:
+                    self._seal_ledger_block(k, n, quorum)
+        elif ctype == P.BLOCK_REQ and self.chain:
+            # Peer requests blocks from 'from_height' (body[1:3])
+            from_height = struct.unpack('>H', body[1:3])[0] if len(body) >= 3 else 1
+            self._send_blocks(origin, from_height)
+        elif ctype == P.BLOCK_RESP and self.chain:
+            # Incoming block from peer
+            try:
+                from .ledger import Block
+                blk = Block.from_wire(body[1:])  # body[0] is the ctype echo
+                self.chain.accept(blk)
+                self.event(f'ledger synced block {blk.height}')
+            except Exception:
+                pass  # bad/stale block – ignore
         self.advance(quorum)
+
+    def _seal_ledger_block(self, target: int, cseq_n: int, quorum: int):
+        """Create and append a ledger block for a just-reached quarantine quorum."""
+        accusers = sorted(self.accusers[target] - {target})
+        records = [quarantine_record(target, accusers, cseq_n)]
+        sigs = dict(self._commit_sigs.get((target, cseq_n), {}))
+        # Ensure our own signature is present if we are in the cluster
+        if self.id in self.cfg.cluster and self.id not in sigs:
+            body = bytes([target]) + struct.pack('>H', cseq_n)
+            self.cseq += 1
+            my_sig = P.sign(self.prov.priv[self.id], P.COMMIT, body, self.id, self.cseq)
+            sigs[self.id] = (self.cseq, my_sig)
+        try:
+            self.chain.append(records, sigs)
+            self.event(f'ledger block {self.chain.height} sealed (quarantine node {target})')
+        except Exception as e:
+            self.event(f'ledger seal failed: {e}')
+
+    def _request_blocks(self, peer_id: int, from_height: int):
+        """Send a BLOCK_REQ CTRL to peer_id asking for blocks from from_height."""
+        body = bytes([P.BLOCK_REQ]) + struct.pack('>H', min(from_height, 0xFFFF))
+        self.cseq += 1
+        sig = P.sign(self.prov.priv[self.id], P.BLOCK_REQ, body[1:], self.id, self.cseq)
+        peer_port = self.cfg.base_port + peer_id
+        frame = P.Frame(P.CTRL, self.id, self.id, peer_id, self.cseq, 1, bytes([P.BLOCK_REQ]) + body[1:] + sig)
+        raw = bytes([self.id]) + P.build(frame, self.prov.knet)
+        self.loop.call_soon(self.transport.sendto, raw, self.hub)
+
+    def _send_blocks(self, requester_id: int, from_height: int):
+        """Send BLOCK_RESP frames to requester for each block from from_height."""
+        if not self.chain: return
+        for h in range(from_height, self.chain.height + 1):
+            blk = self.chain.get_block(h)
+            if blk is None: break
+            wire = blk.to_wire()
+            body = bytes([P.BLOCK_RESP]) + wire
+            # Must fit in one frame; truncate sigs if necessary to stay <=255 bytes
+            if len(body) + P.SIG + 8 > P.MAX_FRAME:  # 8 = header
+                # Strip sigs down to quorum worth to fit
+                from .ledger import Block as _Blk
+                q = 2 * ((len(self.cfg.cluster) - 1) // 3) + 1
+                trimmed = dict(list(blk.sigs.items())[:q])
+                blk2 = _Blk(blk.height, blk.prev_hash, blk.records, blk.block_hash, trimmed)
+                body = bytes([P.BLOCK_RESP]) + blk2.to_wire()
+            self.cseq += 1
+            sig = P.sign(self.prov.priv[self.id], P.BLOCK_RESP, body[1:], self.id, self.cseq)
+            frame = P.Frame(P.CTRL, self.id, self.id, requester_id, self.cseq, 1, body + sig)
+            raw_frame = P.build(frame, self.prov.knet)
+            if len(raw_frame) <= P.MAX_FRAME:
+                delay = (h - from_height) * 0.1 * self.scale
+                self.send(frame, delay=delay)
+
     def evidence(self, k): return len(self.accusers[k] - {k}) >= 2  # at least two distinct signed accusers
     def maybe_propose(self, k):
         if self.id == self.cfg.cluster[0] and not self.mute and k not in self.proposed and k not in self.quarantined and self.evidence(k):

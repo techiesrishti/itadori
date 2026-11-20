@@ -8,8 +8,8 @@ POSITIONS = [(0, 1), (1, 0), (1, 1), (1, 2), (2, 0), (2, 1), (2, 2), (3, 1)]  # 
 RADIO_RANGE = 1.5
 
 class Network:
-    def __init__(self, mode='itadori', scale=0.04, seed=1, positions=POSITIONS, cluster=(0, 1, 3, 6)):
-        self.cfg = Config(mode=mode, scale=scale, seed=seed, cluster=cluster, base_port=random.randint(20000, 60000))
+    def __init__(self, mode='itadori', scale=0.04, seed=1, positions=POSITIONS, cluster=(0, 1, 3, 6), ledger_dir=None):
+        self.cfg = Config(mode=mode, scale=scale, seed=seed, cluster=cluster, base_port=random.randint(20000, 60000), ledger_dir=ledger_dir)
         self.positions, self.prov = positions, P.Provision(len(positions), seed)
     async def start(self):
         self.air = Air(self.positions, RADIO_RANGE, self.cfg.scale, self.cfg.base_port, self.cfg.seed); await self.air.start()
@@ -34,3 +34,18 @@ class Network:
         s0 = self.snapshot(); await self.sleep(protocol_seconds); s1 = self.snapshot()
         sent, ok, bad = (b - a for a, b in zip(s0, s1)); sent = max(sent, 1)
         return {'sent': sent, 'delivery': min(1.0, ok / sent), 'corrupted': min(1.0, bad / sent)}
+    # ledger helpers
+    def ledger_state(self):
+        """Return ledger info for all itadori-mode nodes: height, head hash, agreement."""
+        chains = {n.id: n.chain for n in self.nodes if n.chain is not None}
+        if not chains:
+            return {'height': 0, 'head': '—', 'agree': True, 'intact': True}
+        heights = {nid: c.height for nid, c in chains.items()}
+        heads = {nid: c.head().block_hash[:8].hex() for nid, c in chains.items()}
+        max_h = max(heights.values())
+        head_at_max = [h for nid, h in heads.items() if heights[nid] == max_h]
+        agree = len(set(head_at_max)) == 1
+        intact = all(c.is_intact() for c in chains.values())
+        sample_chain = next(iter(chains.values()))
+        return {'height': max_h, 'head': sample_chain.head().block_hash[:8].hex(),
+                'agree': agree, 'intact': intact, 'per_node': heights}

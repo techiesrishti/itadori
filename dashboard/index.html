@@ -3,25 +3,36 @@
 <title>Itadori dashboard</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
 <style>
-:root{color-scheme:dark;--bg:#050B1A;--panel:#0A1730;--line:#14305F;--ink:#EAF3FF;--mut:#8FA6C8;--cy:#4FD1FF;--am:#FFB347;--rd:#FF5C7A}
+:root{color-scheme:dark;--bg:#050B1A;--panel:#0A1730;--line:#14305F;--ink:#EAF3FF;--mut:#8FA6C8;--cy:#4FD1FF;--am:#FFB347;--rd:#FF5C7A;--gr:#3DCC78}
 *{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 85% -10%,#12356f 0,transparent 55%),var(--bg);color:var(--ink);font:16px/1.5 Inter,system-ui,sans-serif;min-height:100vh}
 header{padding:32px 5vw 18px;display:flex;flex-wrap:wrap;gap:20px 48px;align-items:flex-end;justify-content:space-between}
 h1{font:700 clamp(40px,6vw,72px)/1 'Space Grotesk',sans-serif;margin:0 0 8px;letter-spacing:-0.02em}header p{margin:0;color:var(--mut);max-width:60ch}
 .bar{display:flex;flex-wrap:wrap;gap:10px}
 button{font:500 15px Inter,sans-serif;color:var(--ink);background:#0F2A55;border:1px solid #1B4B9B;border-radius:10px;padding:11px 16px;cursor:pointer}
-button:hover{background:#15397a}button.bad{border-color:var(--rd);background:#3a1426}button.q{background:transparent;border-color:var(--line);color:var(--mut)}button:focus-visible{outline:2px solid var(--cy);outline-offset:2px}
+button:hover{background:#15397a}button.bad{border-color:var(--rd);background:#3a1426}button.warn{border-color:var(--am);background:#2a2010}button.q{background:transparent;border-color:var(--line);color:var(--mut)}button:focus-visible{outline:2px solid var(--cy);outline-offset:2px}
 main{display:grid;grid-template-columns:1fr 1fr;gap:20px;padding:8px 5vw 0}.p{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px}
 .p h2{font:700 28px 'Space Grotesk',sans-serif;margin:0}.sub{margin:2px 0 12px;color:var(--mut)}
 canvas{width:100%;height:340px;display:block;background:radial-gradient(circle,#0d2147,#081227);border-radius:10px;cursor:crosshair}
 .k{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:16px 0 8px}dt{color:var(--mut);font-size:14px}dd{margin:0;font:700 clamp(26px,3.4vw,40px)/1.15 'Space Grotesk',sans-serif}
 .ex{margin:0;color:var(--mut);font-size:15px;min-height:46px}
+/* Ledger panel */
+.ldg{margin-top:16px;border:1px solid var(--line);border-radius:10px;padding:14px 16px;background:#060f24}
+.ldg h3{font:600 14px 'Space Grotesk',sans-serif;margin:0 0 10px;text-transform:uppercase;letter-spacing:.06em;color:var(--cy)}
+.ldg-row{display:flex;gap:24px;flex-wrap:wrap;margin-bottom:10px}
+.ldg-stat{display:flex;flex-direction:column}
+.ldg-stat span:first-child{font-size:12px;color:var(--mut)}
+.ldg-stat span:last-child{font:600 20px 'Space Grotesk',sans-serif}
+.ldg-nodes{display:flex;flex-wrap:wrap;gap:6px;font-size:12px}
+.ldg-node{padding:3px 8px;border-radius:6px;border:1px solid var(--line);background:#0a1a3a;white-space:nowrap}
+.ldg-node.broken{border-color:var(--rd);background:#2a0a10;color:var(--rd)}
+.ldg-node.agree{border-color:var(--gr);background:#0a2a18;color:var(--gr)}
 .foot{padding:20px 5vw 40px;display:grid;grid-template-columns:1fr 1fr;gap:20px;color:var(--mut);font-size:15px}
 ul{list-style:none;margin:0;padding:0}li{padding:4px 0;border-bottom:1px solid var(--line)}li b{color:var(--ink);font-weight:600;margin-right:8px}
 .lg span{margin-right:18px;white-space:nowrap}.lg i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
 @media(max-width:900px){main,.foot{grid-template-columns:1fr}canvas{height:280px}}
 </style></head><body>
 <header><div><h1>Itadori</h1><p>The real protocol stack running live: nodes exchange authenticated frames, route by measured link quality, and vote to quarantine liars. Both networks get the same fault. Click a node to target it, or leave it to hit the busiest relay. <span id="st"></span></p></div>
-<div class="bar"><button data-f="crash">Crash a relay</button><button data-f="cut">Cut a link</button><button data-f="degrade">Degrade a relay</button><button data-f="malicious" class="bad">Turn a relay malicious</button><button id="reset" class="q">Reset</button></div></header>
+<div class="bar"><button data-f="crash">Crash a relay</button><button data-f="cut">Cut a link</button><button data-f="degrade">Degrade a relay</button><button data-f="malicious" class="bad">Turn a relay malicious</button><button data-f="corrupt_ledger" class="warn">Corrupt ledger block</button><button id="reset" class="q">Reset</button></div></header>
 <main id="m"></main>
 <div class="foot"><div><p class="lg"><span><i style="background:#4FD1FF"></i>Healthy</span><span><i style="background:#FFB347"></i>Weak transmitter</span><span><i style="background:#2a3f6a"></i>Crashed</span><span><i style="background:#FF5C7A"></i>Malicious</span></p>
 <p>Lines show each node's current route toward the ringed gateway. Dots are real data frames, amber rings are signed consensus messages. The radio is emulated, everything above it is real code.</p></div>
@@ -29,8 +40,9 @@ ul{list-style:none;margin:0;padding:0}li{padding:4px 0;border-bottom:1px solid v
 <script>
 const $=s=>document.querySelector(s),PAD=34,COL={ok:'#4FD1FF',weak:'#FFB347',dead:'#2a3f6a',bad:'#FF5C7A'};
 let S=null,since=0,sel=null,pulses=[];
-const P=[['Plain mesh','Hop-count routing, trusts every node'],['Itadori','Quality routing, watchdog, signed quarantine consensus']];
-$('#m').innerHTML=P.map(p=>`<section class="p"><h2>${p[0]}</h2><p class="sub">${p[1]}</p><canvas aria-label="${p[0]} live network"></canvas><dl class="k"><div><dt>Delivered</dt><dd class="dl">...</dd></div><div><dt>Corrupted</dt><dd class="cr">...</dd></div><div><dt>Last 30 s</dt><dd class="n" style="font-size:22px;padding-top:8px">protocol time</dd></div></dl><p class="ex"></p></section>`).join('');
+const NETS=[['Plain mesh','Hop-count routing, trusts every node'],['Itadori','Quality routing, watchdog, signed quarantine consensus']];
+$('#m').innerHTML=NETS.map((p,i)=>`<section class="p"><h2>${p[0]}</h2><p class="sub">${p[1]}</p><canvas aria-label="${p[0]} live network"></canvas><dl class="k"><div><dt>Delivered</dt><dd class="dl">...</dd></div><div><dt>Corrupted</dt><dd class="cr">...</dd></div><div><dt>Last 30 s</dt><dd class="n" style="font-size:22px;padding-top:8px">protocol time</dd></div></dl><p class="ex"></p>${i===1?`<div class="ldg" id="ldg"><h3>⛓ Permissioned Ledger</h3><div class="ldg-row"><div class="ldg-stat"><span>Chain height</span><span class="ldg-h">0</span></div><div class="ldg-stat"><span>Head hash</span><span class="ldg-head" style="font-size:13px;font-family:monospace">genesis</span></div><div class="ldg-stat"><span>All nodes agree</span><span class="ldg-agree">—</span></div><div class="ldg-stat"><span>Chain intact</span><span class="ldg-intact">—</span></div></div><div class="ldg-nodes" id="ldg-nodes"></div><p style="font-size:12px;color:var(--mut);margin-top:8px">Finality = quorum (3 of 4) of cluster Ed25519 commit signatures. Not immutable – trustworthy only as long as ≥3 of 4 cluster members are honest.</p></div>`:''}
+</section>`).join('');
 const cv=[...document.querySelectorAll('canvas')],secs=[...document.querySelectorAll('.p')];
 const px=(n,w)=>PAD+n.x*(w-2*PAD),py=(n,h)=>PAD+n.y*(h-2*PAD);
 async function poll(){try{const r=await fetch('/state?since='+since);S=await r.json();
@@ -40,7 +52,29 @@ function ui(){$('#st').textContent=S.t<40?'Mesh is forming, give it a few second
   set('.dl',S.t<40?'...':Math.round(n.delivery*100)+'%',n.delivery>.88?'var(--cy)':n.delivery>.7?'var(--am)':'var(--rd)');
   set('.cr',S.t<40?'...':Math.round(n.corrupted*100)+'%',n.corrupted>.05?'var(--rd)':'');
   const q=n.nodes.filter(x=>x.quar).map(x=>x.id);
-  s.querySelector('.ex').textContent=i?(q.length?'Node '+q.join(', ')+' quarantined by consensus, every node now routes around it.':'No quarantines yet. Consensus runs only when two nodes accuse the same relay.'):'No trust model, so a lying node stays in the route.';});
+  s.querySelector('.ex').textContent=i?(q.length?'Node '+q.join(', ')+' quarantined by consensus, every node now routes around it.':'No quarantines yet. Consensus runs only when two nodes accuse the same relay.'):'No trust model, so a lying node stays in the route.';
+  // Ledger panel (Itadori side only)
+  if(i===1&&n.ledger){
+   const L=n.ledger;
+   const ldg=$('#ldg');if(!ldg)return;
+   ldg.querySelector('.ldg-h').textContent=L.height;
+   ldg.querySelector('.ldg-head').textContent=L.head?L.head.slice(0,16)+'…':'genesis';
+   const agEl=ldg.querySelector('.ldg-agree');
+   agEl.textContent=L.height===0?'—':L.agree?'✓ Yes':'✗ No';
+   agEl.style.color=L.height===0?'var(--mut)':L.agree?'var(--gr)':'var(--rd)';
+   const inEl=ldg.querySelector('.ldg-intact');
+   inEl.textContent=L.height===0?'—':L.intact?'✓ Yes':'✗ Tampered';
+   inEl.style.color=L.height===0?'var(--mut)':L.intact?'var(--gr)':'var(--rd)';
+   const nodesEl=$('#ldg-nodes');
+   if(nodesEl&&L.nodes){
+    const best=L.nodes.filter(x=>x.height>0).map(x=>x.head)[0]||null;
+    nodesEl.innerHTML=L.nodes.map(x=>{
+     const cls=!x.intact?'broken':x.height>0&&x.head===best?'agree':'';
+     return `<span class="ldg-node ${cls}">N${x.id} h=${x.height} ${x.intact?'✓':'✗ broken'}</span>`;
+    }).join('');
+   }
+  }
+ });
  $('#log').innerHTML=S.log.map(l=>`<li><b>${Math.round(l[0])} s</b>${l[1]}</li>`).join('')||'<li>Pick a fault above to start.</li>';}
 function draw(c,i,now){const n=S&&S.nets[i];if(!n)return;const d=devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;if(c.width!==Math.round(w*d)||c.height!==Math.round(h*d)){c.width=Math.round(w*d);c.height=Math.round(h*d);}
  const g=c.getContext('2d');g.setTransform(d,0,0,d,0,0);g.clearRect(0,0,w,h);const N=n.nodes;
