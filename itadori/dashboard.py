@@ -1,6 +1,6 @@
 """Live dashboard. Runs the real protocol stack twice (plain mesh vs Itadori) in one process and serves a web UI.
 Standard library only. Usage: python -m itadori.dashboard [--scale 0.2] [--port 8080]"""
-import argparse, asyncio, json, pathlib, time
+import argparse, asyncio, json, pathlib, time, os
 from urllib.parse import parse_qs, urlparse
 from .network import Network
 
@@ -118,7 +118,7 @@ class Dashboard:
         ev = [(w, m) for w, m in self.log] + [((e[0] - self.t0) / self.scale, e[1]) for e in self.nets[1].nodes[0].events]
         return {'t': round(t, 2), 'nets': nets, 'log': [[round(w, 1), m] for w, m in sorted(ev)[-8:]][::-1]}
 
-async def serve(dash, port, host='127.0.0.1'):
+async def serve(dash, port, host='0.0.0.0'):
     async def handle(r, w):
         try:
             line = (await r.readline()).decode()
@@ -141,10 +141,22 @@ async def serve(dash, port, host='127.0.0.1'):
     return await asyncio.start_server(handle, host, port)
 
 async def main():
-    ap = argparse.ArgumentParser(); ap.add_argument('--scale', type=float, default=0.2, help='real seconds per protocol second'); ap.add_argument('--port', type=int, default=8080)
-    a = ap.parse_args(); d = Dashboard(a.scale); await d.start(); srv = await serve(d, a.port)
-    print(f'Itadori dashboard on http://127.0.0.1:{a.port}  (scale {a.scale}: 1 real second = {1 / a.scale:.0f} protocol seconds)')
-    async with srv: await srv.serve_forever()
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--scale', type=float, default=0.2,
+                    help='real seconds per protocol second')
+    ap.add_argument('--port', type=int, default=int(os.environ.get('PORT', 8080)))
+
+    a = ap.parse_args()
+
+    d = Dashboard(a.scale)
+    await d.start()
+
+    srv = await serve(d, a.port, host='0.0.0.0')
+
+    print(f'Itadori dashboard running on port {a.port}')
+
+    async with srv:
+        await srv.serve_forever()
 
 if __name__ == '__main__':
     try: asyncio.run(main())
