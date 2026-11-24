@@ -1,8 +1,10 @@
 """Test and demo harness: starts N independent nodes plus the radio emulator, injects faults, measures delivery at the gateway."""
-import asyncio, random
+import asyncio, random, time
 from . import protocol as P
 from .air import Air
 from .node import Config, Node
+from .resilience import analyze_topology
+from .sos import pack_sos_payload, CODE_MAP
 
 POSITIONS = [(0, 1), (1, 0), (1, 1), (1, 2), (2, 0), (2, 1), (2, 2), (3, 1)]  # node 0 is the gateway
 RADIO_RANGE = 1.5
@@ -49,3 +51,76 @@ class Network:
         sample_chain = next(iter(chains.values()))
         return {'height': max_h, 'head': sample_chain.head().block_hash[:8].hex(),
                 'agree': agree, 'intact': intact, 'per_node': heights}
+
+    # features: SOS, Resilience, Scenarios, Incident Reporting
+    def send_sos(self, origin_id, code_str='TRAPPED', victims=1, lat_offset=0.0, lon_offset=0.0):
+        """Trigger an emergency SOS alert from a survivor node."""
+        if origin_id < 0 or origin_id >= len(self.nodes):
+            return False
+        node = self.nodes[origin_id]
+        if not node.alive:
+            return False
+        code = CODE_MAP.get(code_str.upper(), 1)
+        return node.trigger_sos(code=code, victims=victims, lat_offset=lat_offset, lon_offset=lon_offset)
+
+    def get_resilience(self):
+        """Live graph-theoretic resilience & SPOF analysis of current mesh."""
+        alive_nodes = set(n.id for n in self.nodes if n.alive)
+        active_links = []
+        for (a, b) in self.air.q:
+            if a < b and a in alive_nodes and b in alive_nodes:
+                edge = (min(a, b), max(a, b))
+                if edge not in self.air.cut:
+                    active_links.append(edge)
+        return analyze_topology(alive_nodes, active_links, gw=self.cfg.gw)
+
+    def run_scenario(self, name):
+        """Execute a scripted disaster scenario."""
+        name = name.lower()
+        if name in ('flood', 'flash_flood'):
+            # Flash flood: cuts perimeter links and drowns outer nodes
+            self.cut(1, 4)
+            self.cut(3, 7)
+            if len(self.nodes) > 4:
+                self.degrade(4, q=0.2)
+            if len(self.nodes) > 7:
+                self.nodes[7].trigger_sos(code=CODE_MAP['FLOOD'], victims=3, lat_offset=0.01, lon_offset=-0.01)
+            return {'scenario': 'Flash Flood', 'status': 'Perimeter severed, Node 7 issued FLOOD SOS'}
+        elif name in ('byzantine', 'infiltration'):
+            # Byzantine attack: turns busiest relay malicious
+            target = self.busiest()
+            self.malicious(target)
+            return {'scenario': 'Byzantine Infiltration', 'status': f'Node {target} turned malicious (tampering packets)'}
+        elif name in ('cascade', 'relay_cascade'):
+            # Cascade: primary relay crashes, secondary is degraded
+            b1 = self.busiest()
+            self.crash(b1)
+            b2 = self.busiest()
+            self.degrade(b2, q=0.3)
+            return {'scenario': 'Relay Cascade', 'status': f'Primary relay Node {b1} crashed, Node {b2} degraded'}
+        return {'scenario': name, 'status': 'Unknown scenario'}
+
+    def export_incident_report(self):
+        """Generate a structured disaster forensics & incident response report."""
+        gw = self.nodes[self.cfg.gw]
+        resilience = self.get_resilience()
+        ledger = self.ledger_state()
+        quarantines = list(getattr(gw, 'quarantined', set()))
+        sos_events = getattr(gw, 'sos_log', [])
+        return {
+            'timestamp': time.time(),
+            'network_mode': self.cfg.mode,
+            'nodes_total': len(self.nodes),
+            'nodes_alive': sum(1 for n in self.nodes if n.alive),
+            'delivery_stats': {
+                'ok': gw.ok,
+                'bad': gw.bad,
+                'total_sent': sum(n.sent for n in self.nodes if n.id != self.cfg.gw)
+            },
+            'resilience': resilience,
+            'ledger': ledger,
+            'quarantined_nodes': quarantines,
+            'sos_alerts': sos_events,
+            'cuts': list(self.air.cut),
+            'dead_nodes': list(self.air.dead)
+        }

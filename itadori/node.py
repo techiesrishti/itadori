@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from . import protocol as P
 from .lora import airtime
 from .ledger import Chain, quarantine_record
+from .sos import pack_sos_payload, unpack_sos_payload, PRIO_EMERGENCY, PRIO_CTRL, PRIO_ROUTING, PRIO_DATA
 
 @dataclass
 class Config:
@@ -37,13 +38,16 @@ class Node(asyncio.DatagramProtocol):
         self.behavior, self.mute = 'honest', False
         self.sent = self.ok = self.bad = self.forwarded = self.fwd_window = 0
         self.events, self.tasks, self.alive = [], [], False
+        self.battery = 100.0
+        self.sos_log = []
+        self.tx_counter = 0
         # ledger – created in start() so pub_keys are ready
         self.chain: Chain = None
     now = staticmethod(time.monotonic)
     def event(self, msg): self.events.append((self.now(), msg))
 
     async def start(self):
-        self.loop = asyncio.get_running_loop(); self.txq = asyncio.Queue()
+        self.loop = asyncio.get_running_loop(); self.txq = asyncio.PriorityQueue()
         self.transport, _ = await self.loop.create_datagram_endpoint(lambda: self, local_addr=('127.0.0.1', self.cfg.base_port + self.id))
         self.hub = ('127.0.0.1', self.cfg.base_port - 1); self.alive = True
         # Initialise ledger (itadori mode only)
@@ -58,21 +62,29 @@ class Node(asyncio.DatagramProtocol):
         self.transport.close()
 
     # ---- radio ----
-    def send(self, f, delay=0.0):
+    def send(self, f, delay=0.0, prio=None):
+        if prio is None:
+            prio = PRIO_EMERGENCY if f.type == P.SOS else PRIO_CTRL if f.type == P.CTRL else PRIO_ROUTING if f.type in (P.HELLO, P.LSA) else PRIO_DATA
         data = P.build(f, self.prov.knet)
-        if delay: self.loop.call_later(delay * self.scale, self.txq.put_nowait, data)
-        else: self.txq.put_nowait(data)
+        self.tx_counter += 1
+        item = (prio, self.tx_counter, data)
+        if delay: self.loop.call_later(delay * self.scale, self.txq.put_nowait, item)
+        else: self.txq.put_nowait(item)
     async def tx_loop(self):
         while True:
-            data = await self.txq.get()
+            item = await self.txq.get()
+            data = item[2] if isinstance(item, tuple) else item
             self.transport.sendto(bytes([self.id]) + data, self.hub)
-            await asyncio.sleep(airtime(len(data)) * self.scale)  # half duplex: one frame on air at a time
+            t_air = airtime(len(data))
+            self.battery = max(5.0, round(self.battery - 0.04 * t_air, 2))
+            await asyncio.sleep(t_air * self.scale)  # half duplex: one frame on air at a time
     def datagram_received(self, data, addr):
         f = P.parse(data, self.prov.knet) if self.alive else None
         if f is None or f.sender == self.id or (self.itadori and f.sender in self.quarantined): return
         if f.type == P.HELLO: self.on_hello(f)
         elif f.type == P.LSA: self.on_lsa(f)
         elif f.type == P.DATA: self.on_data(f)
+        elif f.type == P.SOS: self.on_sos(f)
         elif f.type == P.CTRL and self.itadori: self.on_ctrl(f)
 
     # ---- neighbours and link state ----
@@ -163,6 +175,50 @@ class Node(asyncio.DatagramProtocol):
             tag, app = f.payload[:8], f.payload[8:]
             if hmac.compare_digest(tag, P.e2e_tag(self.prov.e2e[f.origin], f.origin, f.seq, app)): self.ok += 1
             else: self.bad += 1
+            return
+        nh = self.next_hop()
+        if f.ttl <= 1 or nh is None: return
+        pl = f.payload[:-1] + bytes([f.payload[-1] ^ 1]) if self.behavior == 'tamper' else f.payload
+        self.forwarded += 1; self.fwd_window += 1
+        self.tx_data(f.copy(sender=self.id, nexthop=nh, ttl=f.ttl - 1, payload=pl))
+
+    def trigger_sos(self, code=1, victims=1, lat_offset=0.0, lon_offset=0.0):
+        """Originates an authenticated high-priority emergency SOS distress message."""
+        self.dseq = (self.dseq + 1) & 0xFFFF
+        nh = self.next_hop()
+        raw_sos = pack_sos_payload(code, victims, lat_offset, lon_offset)
+        tag = P.e2e_tag(self.prov.e2e[self.id], self.id, self.dseq, raw_sos)
+        payload = tag + raw_sos
+        self.event(f"SOS broadcast initiated: code {code}, {victims} victim(s)")
+        if nh is not None:
+            frame = P.Frame(P.SOS, self.id, self.id, nh, self.dseq, 12, payload)
+            self.tx_data(frame)
+            return True
+        return False
+
+    def on_sos(self, f):
+        """Processes high-priority SOS emergency messages."""
+        key = (f.origin, f.seq); p = self.pending.get(key)
+        if self.itadori:
+            h = hashlib.sha1(f.payload).digest()[:6]; prev = self.heard.get(key)
+            if prev and f.sender == prev[1] and f.sender != prev[0] and prev[2] != h: self.accuse(f.sender)
+            if not prev or f.sender == prev[1]: self.heard[key] = (f.sender, f.nexthop, h, self.now() + 15 * self.scale)
+        if p and f.sender == p[0]:
+            del self.pending[key]
+            if hashlib.sha1(f.payload).digest()[:6] != p[1]: self.accuse(f.sender)
+            return
+        if f.nexthop != self.id or key in self.seen: return
+        self.seen.add(key)
+        if self.id == self.cfg.gw:
+            tag, raw_sos = f.payload[:8], f.payload[8:]
+            if hmac.compare_digest(tag, P.e2e_tag(self.prov.e2e[f.origin], f.origin, f.seq, raw_sos)):
+                sos = unpack_sos_payload(raw_sos, origin=f.origin, seq=f.seq)
+                if sos:
+                    self.sos_log.append(sos)
+                    self.event(f"EMERGENCY SOS: Node {f.origin} - {sos.code_name} ({sos.victims} victims)")
+                self.ok += 1
+            else:
+                self.bad += 1
             return
         nh = self.next_hop()
         if f.ttl <= 1 or nh is None: return

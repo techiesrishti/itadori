@@ -15,6 +15,37 @@ A Byzantine-resilient, self-healing LoRa mesh protocol, written as real networki
 
 The emulated radio is the only part that needs hardware. To run on real radios, replace the UDP `sendto` and receive path in `Node` with an SX126x driver. The protocol code above it does not change.
 
+## Architecture & Data Flow
+
+```mermaid
+flowchart TD
+    subgraph Edge["Field Edge / Survivors"]
+        N7["Survivor Node 7<br/>(SOS Distress)"]
+        N4["Sensor Node 4<br/>(Telemetry)"]
+    end
+
+    subgraph Relays["Mesh Routing & Watchdog Plane"]
+        N3["Relay Node 3<br/>(PriorityQueue TX)"]
+        N1["Relay Node 1<br/>(Overhearing Watchdog)"]
+        MAL["Malicious Relay<br/>(Tampering Packet)"]
+    end
+
+    subgraph Core["PBFT Cluster & Ledger (f=1)"]
+        GW["Gateway Node 0<br/>(Primary / Verifier)"]
+        CL["Cluster Nodes (0, 1, 3, 6)<br/>(Signed 3-of-4 Quorum)"]
+        LEDGER[("Hash-Chained<br/>Decision Ledger")]
+    end
+
+    N7 -- "🚨 SOS (Prio 0)" --> N3
+    N4 -- "Data (Prio 3)" --> MAL
+    MAL -. "Tampered payload" .-> N1
+    N1 -- "Accuse (Ed25519)" --> CL
+    CL -- "2f+1 Commit Quorum" --> GW
+    GW --> LEDGER
+    LEDGER -. "Sync missing blocks" .-> N3
+    N3 -- "Verified Route" --> GW
+```
+
 ## Run
 
 ```
@@ -52,6 +83,25 @@ Every quarantine decision the cluster commits is recorded in a permissioned, has
 - **No block broadcasting.** Every node builds the same block from the committed decision, so full blocks never cross the radio. Nodes gossip a short head hash and height, and a node that is behind requests the missing blocks, which are fragmented to fit the 255-byte LoRa frame limit.
 - **Verification.** Each node checks the whole chain when it loads from disk and refuses a broken one. A node whose chain is corrupted detects it and resyncs from its peers.
 - **Dashboard.** Each network shows chain height, head hash, and whether all live nodes agree. A "Corrupt a block" button tampers with one node's chain so you can watch verification fail and the node recover.
+
+## Disaster Resilience & Field Features
+
+In real emergency relief and search-and-rescue operations, connectivity changes violently and seconds matter. Itadori includes three standalone operational capabilities:
+
+1. **Priority SOS & Compact Emergency Codebook (`itadori/sos.py`)**:
+   - Packets are structured into an 8-byte triage payload (`triage_code`, `victim_count`, `lat_offset`, `lon_offset`).
+   - Standardized triage categories: `CRITICAL_MEDICAL`, `TRAPPED_DEBRIS`, `RISING_FLOOD`, `FIRE_HAZARD`, `SUPPLIES_DEPLETED`, `SAFE_CHECKIN`.
+   - Node transmit queues use `asyncio.PriorityQueue` (`PRIO_EMERGENCY=0`, `PRIO_CTRL=1`, `PRIO_ROUTING=2`, `PRIO_DATA=3`) ensuring emergency survivor distress calls preempt routine telemetry without violating Semtech LoRa airtime constraints.
+   - Includes battery consumption model tracking half-duplex transmit airtime.
+
+2. **Graph Resilience & Single-Point-of-Failure Analyzer (`itadori/resilience.py`)**:
+   - Evaluates mesh topology using Tarjan's algorithm for Articulation Points (cut-vertices) and Bridges.
+   - Computes a live 0-100% Resilience Score and provides diagnostic warnings on bottlenecks.
+   - Nodes flagged as cut-vertices are visually ringed in purple on the dashboard canvas so operators know which relays are single points of failure before they go down.
+
+3. **Disaster Scenarios & Incident Forensics (`itadori/network.py`, `itadori/dashboard.py`)**:
+   - One-click scripted disaster runner (`Flash Flood`, `Byzantine Infiltration`, `Relay Cascade`).
+   - Incident Forensics report exporter (`/report` endpoint) compiling post-incident audit trails (delivery stats, ledger height, active quarantines, and SOS triage log).
 
 ## Results (one run per cell, protocol seconds)
 

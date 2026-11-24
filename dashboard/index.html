@@ -32,16 +32,26 @@ ul{list-style:none;margin:0;padding:0}li{padding:4px 0;border-bottom:1px solid v
 @media(max-width:900px){main,.foot{grid-template-columns:1fr}canvas{height:280px}}
 </style></head><body>
 <header><div><h1>Itadori</h1><p>The real protocol stack running live: nodes exchange authenticated frames, route by measured link quality, and vote to quarantine liars. Both networks get the same fault. Click a node to target it, or leave it to hit the busiest relay. <span id="st"></span></p></div>
-<div class="bar"><button data-f="crash">Crash a relay</button><button data-f="cut">Cut a link</button><button data-f="degrade">Degrade a relay</button><button data-f="malicious" class="bad">Turn a relay malicious</button><button data-f="corrupt_ledger" class="warn">Corrupt ledger block</button><button id="reset" class="q">Reset</button></div></header>
+<div class="bar">
+  <button data-f="crash">Crash a relay</button>
+  <button data-f="cut">Cut a link</button>
+  <button data-f="degrade">Degrade a relay</button>
+  <button data-f="malicious" class="bad">Turn a relay malicious</button>
+  <button data-f="corrupt_ledger" class="warn">Corrupt ledger block</button>
+  <button id="btn-sos" style="border-color:#FF5C7A;background:#401020;color:#FFA0B0">🚨 SOS Broadcast</button>
+  <button id="btn-scenario" style="border-color:#4FD1FF;background:#0d2d55">🌪️ Flash Flood</button>
+  <button id="btn-report" class="q">📋 Export Forensics</button>
+  <button id="reset" class="q">Reset</button>
+</div></header>
 <main id="m"></main>
-<div class="foot"><div><p class="lg"><span><i style="background:#4FD1FF"></i>Healthy</span><span><i style="background:#FFB347"></i>Weak transmitter</span><span><i style="background:#2a3f6a"></i>Crashed</span><span><i style="background:#FF5C7A"></i>Malicious</span></p>
-<p>Lines show each node's current route toward the ringed gateway. Dots are real data frames, amber rings are signed consensus messages. The radio is emulated, everything above it is real code.</p></div>
+<div class="foot"><div><p class="lg"><span><i style="background:#4FD1FF"></i>Healthy</span><span><i style="background:#FFB347"></i>Weak transmitter</span><span><i style="background:#2a3f6a"></i>Crashed</span><span><i style="background:#FF5C7A"></i>Malicious</span><span><i style="background:#E040FB"></i>SPOF Cut-Vertex</span></p>
+<p>Lines show each node's current route toward the ringed gateway. Purple glow flags single points of failure (cut-vertices). Dots are real data frames, amber rings are signed consensus messages, red rings are emergency SOS priority frames.</p></div>
 <div><b style="color:#EAF3FF">What just happened</b><ul id="log"></ul></div></div>
 <script>
 const $=s=>document.querySelector(s),PAD=34,COL={ok:'#4FD1FF',weak:'#FFB347',dead:'#2a3f6a',bad:'#FF5C7A'};
 let S=null,since=0,sel=null,pulses=[];
 const NETS=[['Plain mesh','Hop-count routing, trusts every node'],['Itadori','Quality routing, watchdog, signed quarantine consensus']];
-$('#m').innerHTML=NETS.map((p,i)=>`<section class="p"><h2>${p[0]}</h2><p class="sub">${p[1]}</p><canvas aria-label="${p[0]} live network"></canvas><dl class="k"><div><dt>Delivered</dt><dd class="dl">...</dd></div><div><dt>Corrupted</dt><dd class="cr">...</dd></div><div><dt>Last 30 s</dt><dd class="n" style="font-size:22px;padding-top:8px">protocol time</dd></div></dl><p class="ex"></p>${i===1?`<div class="ldg" id="ldg"><h3>⛓ Permissioned Ledger</h3><div class="ldg-row"><div class="ldg-stat"><span>Chain height</span><span class="ldg-h">0</span></div><div class="ldg-stat"><span>Head hash</span><span class="ldg-head" style="font-size:13px;font-family:monospace">genesis</span></div><div class="ldg-stat"><span>All nodes agree</span><span class="ldg-agree">—</span></div><div class="ldg-stat"><span>Chain intact</span><span class="ldg-intact">—</span></div></div><div class="ldg-nodes" id="ldg-nodes"></div><p style="font-size:12px;color:var(--mut);margin-top:8px">Finality = quorum (3 of 4) of cluster Ed25519 commit signatures. Not immutable – trustworthy only as long as ≥3 of 4 cluster members are honest.</p></div>`:''}
+$('#m').innerHTML=NETS.map((p,i)=>`<section class="p"><h2>${p[0]}</h2><p class="sub">${p[1]}</p><canvas aria-label="${p[0]} live network"></canvas><dl class="k"><div><dt>Delivered</dt><dd class="dl">...</dd></div><div><dt>Corrupted</dt><dd class="cr">...</dd></div><div><dt>Resilience</dt><dd class="rs" style="color:var(--cy)">100%</dd></div></dl><p class="ex"></p>${i===1?`<div class="ldg" id="ldg"><h3>⛓ Permissioned Ledger</h3><div class="ldg-row"><div class="ldg-stat"><span>Chain height</span><span class="ldg-h">0</span></div><div class="ldg-stat"><span>Head hash</span><span class="ldg-head" style="font-size:13px;font-family:monospace">genesis</span></div><div class="ldg-stat"><span>All nodes agree</span><span class="ldg-agree">—</span></div><div class="ldg-stat"><span>Chain intact</span><span class="ldg-intact">—</span></div></div><div class="ldg-nodes" id="ldg-nodes"></div><div id="sos-box" style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);font-size:12px;color:var(--rd)"><b>Live SOS Distress Feed:</b> <span id="sos-feed">None</span></div><p style="font-size:12px;color:var(--mut);margin-top:8px">Finality = quorum (3 of 4) of cluster Ed25519 commit signatures. Not immutable – trustworthy only as long as ≥3 of 4 cluster members are honest.</p></div>`:''}
 </section>`).join('');
 const cv=[...document.querySelectorAll('canvas')],secs=[...document.querySelectorAll('.p')];
 const px=(n,w)=>PAD+n.x*(w-2*PAD),py=(n,h)=>PAD+n.y*(h-2*PAD);
@@ -51,27 +61,38 @@ function ui(){$('#st').textContent=S.t<40?'Mesh is forming, give it a few second
  S.nets.forEach((n,i)=>{const s=secs[i],set=(c,v,col)=>{const e=s.querySelector(c);e.textContent=v;e.style.color=col||''};
   set('.dl',S.t<40?'...':Math.round(n.delivery*100)+'%',n.delivery>.88?'var(--cy)':n.delivery>.7?'var(--am)':'var(--rd)');
   set('.cr',S.t<40?'...':Math.round(n.corrupted*100)+'%',n.corrupted>.05?'var(--rd)':'');
+  if(n.resilience){
+    const rScore=n.resilience.score||0;
+    set('.rs',rScore+'%',rScore>75?'var(--gr)':rScore>45?'var(--am)':'var(--rd)');
+  }
   const q=n.nodes.filter(x=>x.quar).map(x=>x.id);
   s.querySelector('.ex').textContent=i?(q.length?'Node '+q.join(', ')+' quarantined by consensus, every node now routes around it.':'No quarantines yet. Consensus runs only when two nodes accuse the same relay.'):'No trust model, so a lying node stays in the route.';
-  // Ledger panel (Itadori side only)
-  if(i===1&&n.ledger){
-   const L=n.ledger;
-   const ldg=$('#ldg');if(!ldg)return;
-   ldg.querySelector('.ldg-h').textContent=L.height;
-   ldg.querySelector('.ldg-head').textContent=L.head?L.head.slice(0,16)+'…':'genesis';
-   const agEl=ldg.querySelector('.ldg-agree');
-   agEl.textContent=L.height===0?'—':L.agree?'✓ Yes':'✗ No';
-   agEl.style.color=L.height===0?'var(--mut)':L.agree?'var(--gr)':'var(--rd)';
-   const inEl=ldg.querySelector('.ldg-intact');
-   inEl.textContent=L.height===0?'—':L.intact?'✓ Yes':'✗ Tampered';
-   inEl.style.color=L.height===0?'var(--mut)':L.intact?'var(--gr)':'var(--rd)';
-   const nodesEl=$('#ldg-nodes');
-   if(nodesEl&&L.nodes){
-    const best=L.nodes.filter(x=>x.height>0).map(x=>x.head)[0]||null;
-    nodesEl.innerHTML=L.nodes.map(x=>{
-     const cls=!x.intact?'broken':x.height>0&&x.head===best?'agree':'';
-     return `<span class="ldg-node ${cls}">N${x.id} h=${x.height} ${x.intact?'✓':'✗ broken'}</span>`;
-    }).join('');
+  // Ledger panel & SOS feed (Itadori side only)
+  if(i===1){
+   if(n.sos_log&&n.sos_log.length){
+     const last=n.sos_log[n.sos_log.length-1];
+     const el=$('#sos-feed');
+     if(el) el.textContent=`[N${last.origin} ${last.code_name} (${last.victims} victims)] @ (${last.lat.toFixed(3)}, ${last.lon.toFixed(3)})`;
+   }
+   if(n.ledger){
+    const L=n.ledger;
+    const ldg=$('#ldg');if(!ldg)return;
+    ldg.querySelector('.ldg-h').textContent=L.height;
+    ldg.querySelector('.ldg-head').textContent=L.head?L.head.slice(0,16)+'…':'genesis';
+    const agEl=ldg.querySelector('.ldg-agree');
+    agEl.textContent=L.height===0?'—':L.agree?'✓ Yes':'✗ No';
+    agEl.style.color=L.height===0?'var(--mut)':L.agree?'var(--gr)':'var(--rd)';
+    const inEl=ldg.querySelector('.ldg-intact');
+    inEl.textContent=L.height===0?'—':L.intact?'✓ Yes':'✗ Tampered';
+    inEl.style.color=L.height===0?'var(--mut)':L.intact?'var(--gr)':'var(--rd)';
+    const nodesEl=$('#ldg-nodes');
+    if(nodesEl&&L.nodes){
+     const best=L.nodes.filter(x=>x.height>0).map(x=>x.head)[0]||null;
+     nodesEl.innerHTML=L.nodes.map(x=>{
+      const cls=!x.intact?'broken':x.height>0&&x.head===best?'agree':'';
+      return `<span class="ldg-node ${cls}">N${x.id} h=${x.height} ${x.intact?'✓':'✗ broken'}</span>`;
+     }).join('');
+    }
    }
   }
  });
@@ -83,9 +104,11 @@ function draw(c,i,now){const n=S&&S.nets[i];if(!n)return;const d=devicePixelRati
  pulses=pulses.filter(p=>now-p.t0<700);
  for(const p of pulses){if(p.i!==i)continue;const f=(now-p.t0)/700,a=N[p.s];if(!a)continue;
   if(p.t===3&&N[p.n]){const b=N[p.n];g.fillStyle='#c8f1ff';g.beginPath();g.arc(px(a,w)+(px(b,w)-px(a,w))*f,py(a,h)+(py(b,h)-py(a,h))*f,3.5,0,7);g.fill();}
-  else if(p.t===4){g.strokeStyle='rgba(255,179,71,'+(1-f)+')';g.lineWidth=2;g.beginPath();g.arc(px(a,w),py(a,h),12+30*f,0,7);g.stroke();}}
+  else if(p.t===4){g.strokeStyle='rgba(255,179,71,'+(1-f)+')';g.lineWidth=2;g.beginPath();g.arc(px(a,w),py(a,h),12+30*f,0,7);g.stroke();}
+  else if(p.t===5){g.strokeStyle='rgba(255,92,122,'+(1-f)+')';g.lineWidth=3;g.beginPath();g.arc(px(a,w),py(a,h),14+35*f,0,7);g.stroke();}}
  for(const a of N){const x=px(a,w),y=py(a,h),st=!a.alive?'dead':a.bad?'bad':a.weak?'weak':'ok';g.fillStyle=COL[st];g.beginPath();g.arc(x,y,a.gw?13:10,0,7);g.fill();
   g.fillStyle='#07122B';g.font='600 11px Inter,sans-serif';g.textAlign='center';g.fillText(a.id,x,y+4);
+  if(a.is_cut_vertex&&a.alive&&!a.gw){g.strokeStyle='#E040FB';g.lineWidth=2;g.beginPath();g.arc(x,y,15,0,7);g.stroke();}
   if(a.gw){g.strokeStyle='#EAF3FF';g.lineWidth=2;g.beginPath();g.arc(x,y,18,0,7);g.stroke();}
   if(a.quar){g.strokeStyle='#FF5C7A';g.lineWidth=2;g.setLineDash([4,4]);g.beginPath();g.arc(x,y,20,0,7);g.stroke();g.setLineDash([]);}
   if(a.id===sel){g.strokeStyle='#fff';g.lineWidth=2;g.beginPath();g.arc(x,y,16,0,7);g.stroke();}
@@ -93,6 +116,9 @@ function draw(c,i,now){const n=S&&S.nets[i];if(!n)return;const d=devicePixelRati
 function frame(now){cv.forEach((c,i)=>draw(c,i,now));requestAnimationFrame(frame);}
 cv.forEach((c,i)=>c.addEventListener('click',e=>{if(!S)return;const r=c.getBoundingClientRect();let best=null,bd=24;S.nets[i].nodes.forEach(n=>{const d=Math.hypot(px(n,r.width)-(e.clientX-r.left),py(n,r.height)-(e.clientY-r.top));if(d<bd){bd=d;best=n.id;}});sel=best!==null&&!S.nets[i].nodes[best].gw?best:null;}));
 document.querySelectorAll('[data-f]').forEach(b=>b.onclick=async()=>{await fetch('/fault?kind='+b.dataset.f+(sel!==null?'&node='+sel:''),{method:'POST'});sel=null;});
+$('#btn-sos').onclick=async()=>{await fetch('/sos'+(sel!==null?'?node='+sel:''),{method:'POST'});sel=null;};
+$('#btn-scenario').onclick=async()=>{await fetch('/scenario?name=flood',{method:'POST'});};
+$('#btn-report').onclick=async()=>{window.open('/report','_blank');};
 $('#reset').onclick=async()=>{await fetch('/reset',{method:'POST'});since=0;pulses=[];};
 poll();requestAnimationFrame(frame);
 </script></body></html>

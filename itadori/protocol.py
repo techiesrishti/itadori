@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-HELLO, LSA, DATA, CTRL = 1, 2, 3, 4
+HELLO, LSA, DATA, CTRL, SOS = 1, 2, 3, 4, 5
 ACCUSE, PREPREPARE, PREPARE, COMMIT = 1, 2, 3, 4
 BLOCK_REQ, BLOCK_RESP = 5, 6   # ledger sync CTRL subtypes
 BCAST, MAC, SIG, MAX_FRAME = 0xFF, 8, 64, 255
